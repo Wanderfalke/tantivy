@@ -1,9 +1,10 @@
-use crate::common::BinarySerializable;
+use crate::common::{BinarySerializable, VInt};
 use crate::directory::ReadOnlySource;
 use crate::postings::compression::{compressed_block_size, COMPRESSION_BLOCK_SIZE};
 use crate::schema::IndexRecordOption;
 use crate::{DocId, Score, TERMINATED};
 use owned_read::OwnedRead;
+use crate::query::BM25Weight;
 
 pub struct SkipSerializer {
     buffer: Vec<u8>,
@@ -40,6 +41,11 @@ impl SkipSerializer {
             .expect("Should never fail");
     }
 
+    pub fn write_blockwand_max(&mut self, fieldnorm_id: u8, term_freq: u32) {
+        self.buffer.push(fieldnorm_id);
+        VInt(term_freq as u64).serialize_into_vec(&mut self.buffer);
+    }
+
     pub fn data(&self) -> &[u8] {
         &self.buffer[..]
     }
@@ -69,6 +75,8 @@ pub(crate) enum BlockInfo {
         doc_num_bits: u8,
         tf_num_bits: u8,
         tf_sum: u32,
+        block_wand_fieldnorm_id: u8,
+        block_wand_term_freq: u32,
     },
     VInt(u32),
 }
@@ -102,8 +110,19 @@ impl SkipReader {
         self.remaining_docs = doc_freq;
     }
 
-    pub fn block_max_score(&self) -> Score {
-        f32::MAX
+    pub fn block_max_score(&self, bm25_weight: &BM25Weight) -> Score {
+        match self.block_info {
+            BlockInfo::BitPacked {
+                block_wand_fieldnorm_id,
+                block_wand_term_freq,
+                ..
+            } => {
+                bm25_weight.score(block_wand_fieldnorm_id, block_wand_term_freq)
+            },
+            BlockInfo::VInt(_) => {
+                f32::MAX
+            }
+        }
     }
 
     pub(crate) fn last_doc_in_block(&self) -> DocId {
@@ -129,25 +148,36 @@ impl SkipReader {
                     doc_num_bits,
                     tf_num_bits: 0,
                     tf_sum: 0,
+                    block_wand_fieldnorm_id: 0,
+                    block_wand_term_freq: 0
                 };
             }
             IndexRecordOption::WithFreqs => {
                 let tf_num_bits = self.owned_read.get(1);
+                let block_wand_fieldnorm_id = self.owned_read.get(2);
+                self.owned_read.advance(3);
+                let block_wand_term_freq = VInt::deserialize_u64(&mut self.owned_read).unwrap() as u32;
                 self.block_info = BlockInfo::BitPacked {
                     doc_num_bits,
                     tf_num_bits,
                     tf_sum: 0,
+                    block_wand_fieldnorm_id,
+                    block_wand_term_freq
                 };
-                self.owned_read.advance(2);
             }
             IndexRecordOption::WithFreqsAndPositions => {
                 let tf_num_bits = self.owned_read.get(1);
                 self.owned_read.advance(2);
                 let tf_sum = u32::deserialize(&mut self.owned_read).expect("Failed reading tf_sum");
+                let block_wand_fieldnorm_id = self.owned_read.get(0);
+                self.owned_read.advance(1);
+                let block_wand_term_freq = VInt::deserialize_u64(&mut self.owned_read).unwrap() as u32;
                 self.block_info = BlockInfo::BitPacked {
                     doc_num_bits,
                     tf_num_bits,
                     tf_sum,
+                    block_wand_fieldnorm_id,
+                    block_wand_term_freq
                 };
             }
         }
@@ -173,6 +203,7 @@ impl SkipReader {
                 doc_num_bits,
                 tf_num_bits,
                 tf_sum,
+                ..
             } => {
                 self.remaining_docs -= COMPRESSION_BLOCK_SIZE as u32;
                 self.byte_offset += compressed_block_size(doc_num_bits + tf_num_bits);
@@ -209,8 +240,10 @@ mod tests {
             let mut skip_serializer = SkipSerializer::new();
             skip_serializer.write_doc(1u32, 2u8);
             skip_serializer.write_term_freq(3u8);
+            skip_serializer.write_blockwand_max(13u8, 3u32);
             skip_serializer.write_doc(5u32, 5u8);
             skip_serializer.write_term_freq(2u8);
+            skip_serializer.write_blockwand_max(8u8, 2u32);
             skip_serializer.data().to_owned()
         };
         let doc_freq = 3u32 + (COMPRESSION_BLOCK_SIZE * 2) as u32;
@@ -226,7 +259,9 @@ mod tests {
             BlockInfo::BitPacked {
                 doc_num_bits: 2u8,
                 tf_num_bits: 3u8,
-                tf_sum: 0
+                tf_sum: 0,
+                block_wand_fieldnorm_id: 13,
+                block_wand_term_freq: 3
             }
         );
         assert!(skip_reader.advance());
@@ -236,7 +271,9 @@ mod tests {
             BlockInfo::BitPacked {
                 doc_num_bits: 5u8,
                 tf_num_bits: 2u8,
-                tf_sum: 0
+                tf_sum: 0,
+                block_wand_fieldnorm_id: 8,
+                block_wand_term_freq: 2
             }
         );
         assert!(skip_reader.advance());
@@ -265,7 +302,9 @@ mod tests {
             BlockInfo::BitPacked {
                 doc_num_bits: 2u8,
                 tf_num_bits: 0,
-                tf_sum: 0u32
+                tf_sum: 0u32,
+                block_wand_fieldnorm_id: 0,
+                block_wand_term_freq: 0
             }
         );
         assert!(skip_reader.advance());
@@ -275,7 +314,9 @@ mod tests {
             BlockInfo::BitPacked {
                 doc_num_bits: 5u8,
                 tf_num_bits: 0,
-                tf_sum: 0u32
+                tf_sum: 0u32,
+                block_wand_fieldnorm_id: 0,
+                block_wand_term_freq: 0
             }
         );
         assert!(skip_reader.advance());
@@ -303,7 +344,9 @@ mod tests {
             BlockInfo::BitPacked {
                 doc_num_bits: 2u8,
                 tf_num_bits: 0,
-                tf_sum: 0u32
+                tf_sum: 0u32,
+                block_wand_fieldnorm_id: 0,
+                block_wand_term_freq: 0
             }
         );
         assert!(!skip_reader.advance());

@@ -4,7 +4,7 @@ use crate::DocId;
 use crate::Score;
 
 use crate::fieldnorm::FieldNormReader;
-use crate::postings::Postings;
+use crate::postings::{Postings, FreqReadingOption};
 use crate::postings::SegmentPostings;
 use crate::query::bm25::BM25Weight;
 
@@ -25,6 +25,14 @@ impl TermScorer {
             fieldnorm_reader,
             similarity_weight,
         }
+    }
+
+    pub(crate) fn freq_reading_option(&self) -> FreqReadingOption {
+        self.postings.block_cursor.freq_reading_option()
+    }
+
+    pub fn block_max_score(&self) -> Score {
+        self.postings.block_cursor.skip_reader.block_max_score(&self.similarity_weight)
     }
 }
 

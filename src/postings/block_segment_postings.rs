@@ -102,6 +102,10 @@ impl BlockSegmentPostings {
         block_segment_postings
     }
 
+    pub(crate) fn freq_reading_option(&self) -> FreqReadingOption {
+        self.freq_reading_option
+    }
+
     // Resets the block segment postings on another position
     // in the postings file.
     //
@@ -125,7 +129,8 @@ impl BlockSegmentPostings {
         self.doc_freq = doc_freq;
     }
 
-    /// Returns the document frequency associated to this block postings.
+    /// Returns the overall number of documents in the block postings.
+    /// It does not take in account whether documents are deleted or not.
     ///
     /// This `doc_freq` is simply the sum of the length of all of the blocks
     /// length, and it does not take in account deleted documents.
@@ -139,29 +144,42 @@ impl BlockSegmentPostings {
     /// returned by `.docs()` is empty.
     #[inline]
     pub fn docs(&self) -> &[DocId] {
+        debug_assert!(self.block_is_loaded());
         self.doc_decoder.output_array()
     }
 
+
+    /// Returns a full block, regardless of whetehr the block is complete or incomplete (
+    /// as it happens for the last block of the posting list).
+    ///
+    /// In the latter case, the block is guaranteed to be padded with the sentinel value:
+    /// `TERMINATED`. The array is also guaranteed to be aligned on 16 bytes = 128 bits.
+    ///
+    /// This method is useful to run SSE2 linear search.
     #[inline(always)]
     pub(crate) fn docs_aligned(&self) -> &AlignedBuffer {
+        debug_assert!(self.block_is_loaded());
         self.doc_decoder.output_aligned()
     }
 
     /// Return the document at index `idx` of the block.
     #[inline(always)]
     pub fn doc(&self, idx: usize) -> u32 {
+        debug_assert!(self.block_is_loaded());
         self.doc_decoder.output(idx)
     }
 
     /// Return the array of `term freq` in the block.
     #[inline]
     pub fn freqs(&self) -> &[u32] {
+        debug_assert!(self.block_is_loaded());
         self.freq_decoder.output_array()
     }
 
     /// Return the frequency at index `idx` of the block.
     #[inline]
     pub fn freq(&self, idx: usize) -> u32 {
+        debug_assert!(self.block_is_loaded());
         self.freq_decoder.output(idx)
     }
 
@@ -172,6 +190,7 @@ impl BlockSegmentPostings {
     /// of any number between 1 and `NUM_DOCS_PER_BLOCK - 1`
     #[inline]
     pub fn block_len(&self) -> usize {
+        debug_assert!(self.block_is_loaded());
         self.doc_decoder.output_len
     }
 
@@ -184,8 +203,20 @@ impl BlockSegmentPostings {
     /// If all docs are smaller than target, the block loaded may be empty,
     /// or be the last an incomplete VInt block.
     pub fn seek(&mut self, target_doc: DocId) {
-        self.skip_reader.seek(target_doc);
+        self.shallow_seek(target_doc);
         self.load_block();
+    }
+
+    /// Dangerous API! This calls seek on the skip list,
+    /// but does not `.load_block()` afterwards.
+    ///
+    /// `.load_block()` needs to be called manually afterwards.
+    pub(crate) fn shallow_seek(&mut self, target_doc: DocId) {
+        self.skip_reader.seek(target_doc);
+    }
+
+    fn block_is_loaded(&self) -> bool {
+        self.loaded_offset == self.skip_reader.byte_offset()
     }
 
     fn load_block(&mut self) {
@@ -244,7 +275,7 @@ impl BlockSegmentPostings {
     pub fn empty() -> BlockSegmentPostings {
         BlockSegmentPostings {
             doc_decoder: BlockDecoder::with_val(TERMINATED),
-            loaded_offset: std::usize::MAX,
+            loaded_offset: 0,
             freq_decoder: BlockDecoder::with_val(1),
             freq_reading_option: FreqReadingOption::NoFreq,
             doc_freq: 0,
@@ -272,8 +303,10 @@ mod tests {
     #[test]
     fn test_empty_segment_postings() {
         let mut postings = SegmentPostings::empty();
+        assert_eq!(postings.doc(), TERMINATED);
         assert_eq!(postings.advance(), TERMINATED);
         assert_eq!(postings.advance(), TERMINATED);
+        assert_eq!(postings.doc_freq(), 0);
         assert_eq!(postings.len(), 0);
     }
 

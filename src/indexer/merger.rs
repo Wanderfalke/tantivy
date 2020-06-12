@@ -596,7 +596,10 @@ impl IndexMerger {
 
                 // We know that there is at least one document containing
                 // the term, so we add it.
-                let to_term_ord = field_serializer.new_term(term_bytes)?;
+                let term_doc_freq = segment_postings.iter()
+                    .map(|(_, segment_posting)| segment_posting.doc_freq())
+                    .sum();
+                let to_term_ord = field_serializer.new_term(term_bytes, term_doc_freq)?;
 
                 if let Some(ref mut term_ord_mapping) = term_ord_mapping_opt {
                     for (segment_ord, from_term_ord) in merged_terms.matching_segments() {

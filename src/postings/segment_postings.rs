@@ -38,6 +38,8 @@ impl SegmentPostings {
         }
     }
 
+    /// Returns the overall number of documents in the block postings.
+    /// It does not take in account whether documents are deleted or not.
     pub fn doc_freq(&self) -> u32 {
         self.block_cursor.doc_freq()
     }

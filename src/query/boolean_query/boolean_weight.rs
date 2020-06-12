@@ -13,6 +13,7 @@ use crate::query::{intersect_scorers, Explanation};
 use crate::query::Union;
 use crate::{DocId, Score};
 use std::collections::HashMap;
+use crate::postings::FreqReadingOption;
 
 enum SpecializedScorer {
     TermUnion(Vec<TermScorer>),
@@ -35,7 +36,13 @@ where
                 .into_iter()
                 .map(|scorer| *(scorer.downcast::<TermScorer>().map_err(|_| ()).unwrap()))
                 .collect();
-            return SpecializedScorer::TermUnion(scorers);
+            if scorers.iter()
+                .all(|scorer| scorer.freq_reading_option() == FreqReadingOption::ReadFreq) {
+                // Block wand is only available iff we read frequencies.
+                return SpecializedScorer::TermUnion(scorers);
+            } else {
+                return SpecializedScorer::Other(Box::new(Union::<_, TScoreCombiner>::from(scorers)))
+            }
         }
     }
     SpecializedScorer::Other(Box::new(Union::<_, TScoreCombiner>::from(scorers)))
@@ -211,7 +218,7 @@ impl Weight for BooleanWeight {
         let scorer = self.complex_scorer::<SumWithCoordsCombiner>(reader, 1.0f32)?;
         match scorer {
             SpecializedScorer::TermUnion(term_scorers) => {
-                super::block_wand(term_scorers, threshold, callback);
+                    super::block_wand(term_scorers, threshold, callback);
             }
             SpecializedScorer::Other(mut scorer) => {
                 for_each_pruning_scorer(scorer.as_mut(), threshold, callback);
